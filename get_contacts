@@ -1,0 +1,142 @@
+<?php
+require 'vendor/autoload.php';
+
+// config
+$apiToken = 'Your_Api_Token';
+$csvFile = './output.csv';
+
+$client = new \GuzzleHttp\Client([
+    'base_uri' => 'https://api.bexio.com/2.0/',
+    'headers' => [
+        'Accept' => 'application/json',
+        'Authorization' => 'Bearer ' . $apiToken
+    ]
+]);
+
+try {
+    $fp = fopen($csvFile, 'w');
+    fwrite($fp, "\xEF\xBB\xBF"); // UTF-8 BOM für Excel
+
+    // Header
+    fputcsv($fp, [
+        'Nr',
+        'Kontakt_Nr',
+        'Name',
+        'Adresse',
+        'Adresse_Nr',
+        'PLZ',
+        'Ort',
+        'Mail',
+        'Telefon',
+        'Sprache'
+    ]);
+
+    $i = 1;
+    $notFoundCount = 0;
+    $maxConsecutiveMisses = 10;
+    $pause = 200000; // Startpause: 200ms
+
+    while ($notFoundCount < $maxConsecutiveMisses) {
+        $targetContactNr = str_pad($i, 6, '0', STR_PAD_LEFT);
+
+        try {
+            $response = $client->post('contact/search', [
+                'json' => [
+                    [
+                        'field' => 'nr',
+                        'value' => $targetContactNr,
+                        'criteria' => '='
+                    ]
+                ],
+                'http_errors' => false
+            ]);
+
+            $status = $response->getStatusCode();
+
+            if ($status == 429) {
+                error_log("Rate Limit erreicht bei Nr $targetContactNr – warte 60 Sekunden...");
+                sleep(60);
+                $pause += 100000;
+                continue;
+            }
+
+            if ($status >= 500) {
+                error_log("Serverfehler ($status) bei Nr $targetContactNr – warte 10 Sekunden...");
+                sleep(10);
+                continue;
+            }
+
+            $contacts = json_decode($response->getBody(), true);
+
+            if (!empty($contacts) && isset($contacts[0])) {
+                $notFoundCount = 0;
+                $contact = $contacts[0];
+
+                // set language
+                $language = 'IT';
+                if (isset($contact['language_id'])) {
+                    if ($contact['language_id'] == 1) $language = 'DE';
+                    elseif ($contact['language_id'] == 2) $language = 'FR';
+                }
+
+                // split address ( only for older versions, got changed in the new bexio api )
+                $addressRaw = $contact['address'] ?? '';
+                $street = '';
+                $houseNumber = '';
+
+                if (!empty($addressRaw)) {
+                    preg_match('/^(.*?)(\\s\\d+[a-zA-Z]?)$/', trim($addressRaw), $matches);
+                    if (count($matches) === 3) {
+                        $street = trim($matches[1]);
+                        $houseNumber = trim($matches[2]);
+                    } else {
+                        $street = trim($addressRaw);
+                    }
+                }
+
+                fputcsv($fp, [
+                    $contact['id'] ?? '',
+                    $contact['nr'] ?? '',
+                    ($contact['name_1'] ?? '') . ' ' . ($contact['name_2'] ?? ''),
+                    $street,
+                    $houseNumber,
+                    $contact['postcode'] ?? '',
+                    $contact['city'] ?? '',
+                    $contact['mail'] ?? '',
+                    $contact['phone_mobile'] ?? $contact['phone_fixed'] ?? '',
+                    $language
+                ]);
+
+                $i++;
+
+            } else {
+                $notFoundCount++;
+                fputcsv($fp, [
+                    '',
+                    $targetContactNr,
+                    'Nicht gefunden',
+                    '',
+                    '',
+                    '',
+                    '',
+                    '',
+                    '',
+                    ''
+                ]);
+                $i++;
+            }
+
+        } catch (Exception $e) {
+            error_log("Failed at $targetContactNr: " . $e->getMessage());
+            sleep(5);
+        }
+
+        usleep($pause);
+    }
+
+    fclose($fp);
+    echo "✅ Done: " . realpath($csvFile) . PHP_EOL;
+
+} catch (Exception $e) {
+    die("❌ Error: " . $e->getMessage());
+}
