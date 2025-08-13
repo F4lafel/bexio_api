@@ -114,7 +114,7 @@ try {
                 fputcsv($fp, [
                     '',
                     $targetContactNr,
-                    'Nicht gefunden',
+                    'Not found',
                     '',
                     '',
                     '',
